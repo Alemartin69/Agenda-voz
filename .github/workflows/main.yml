@@ -22,18 +22,40 @@ jobs:
 
       - run: npm install -g eas-cli
 
+      - name: Generar keystore
+        run: |
+          keytool -genkeypair -v \
+            -keystore agenda-voz.keystore \
+            -alias agenda-voz \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass android123 -keypass android123 \
+            -dname "CN=AgendaVoz,O=AgendaVoz,C=AR"
+
+      - name: Crear credentials.json
+        run: |
+          echo '{
+            "android": {
+              "keystore": {
+                "keystorePath": "agenda-voz.keystore",
+                "keystorePassword": "android123",
+                "keyAlias": "agenda-voz",
+                "keyPassword": "android123"
+              }
+            }
+          }' > credentials.json
+
       - name: Registrar proyecto en Expo
         run: eas init --force --non-interactive
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
 
       - name: Compilar APK
-        run: eas build -p android --profile preview --non-interactive
+        run: eas build -p android --profile preview --non-interactive --local --output ./agenda-voz-release.apk
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
 
       - uses: actions/upload-artifact@v4
         with:
           name: agenda-voz-apk
-          path: "agenda-voz/*.apk"
+          path: agenda-voz/agenda-voz-release.apk
           retention-days: 30
