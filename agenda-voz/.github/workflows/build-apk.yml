@@ -7,33 +7,56 @@ on:
 
 jobs:
   build:
-    name: Build APK en la nube
     runs-on: ubuntu-latest
-
     steps:
-      - name: Descargar código
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Configurar Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: 17
+          distribution: temurin
+
+      - name: Instalar Android SDK
+        uses: android-actions/setup-android@v3
 
       - name: Instalar dependencias
-        run: npm install
+        run: npm install --legacy-peer-deps
+        working-directory: agenda-voz
 
-      - name: Instalar EAS CLI
-        run: npm install -g eas-cli
+      - name: Generar proyecto Android nativo
+        run: npx expo prebuild --platform android --clean
+        working-directory: agenda-voz
 
-      - name: Compilar APK con EAS
-        run: eas build -p android --profile preview --non-interactive
-        env:
-          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+      - name: Dar permisos a gradlew
+        run: chmod +x android/gradlew
+        working-directory: agenda-voz
 
-      - name: Subir APK como artefacto descargable
-        uses: actions/upload-artifact@v4
+      - name: Compilar APK
+        run: ./gradlew assembleRelease --no-daemon
+        working-directory: agenda-voz/android
+
+      - name: Firmar APK
+        run: |
+          keytool -genkeypair -v \
+            -keystore release.keystore \
+            -alias agenda-voz \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass android123 -keypass android123 \
+            -dname "CN=AgendaVoz,O=AgendaVoz,C=AR"
+          $ANDROID_HOME/build-tools/34.0.0/apksigner sign \
+            --ks release.keystore \
+            --ks-pass pass:android123 \
+            --key-pass pass:android123 \
+            --ks-key-alias agenda-voz \
+            --out agenda-voz-signed.apk \
+            agenda-voz/android/app/build/outputs/apk/release/app-release-unsigned.apk
+
+      - uses: actions/upload-artifact@v4
         with:
           name: agenda-voz-apk
-          path: "*.apk"
+          path: agenda-voz-signed.apk
           retention-days: 30
