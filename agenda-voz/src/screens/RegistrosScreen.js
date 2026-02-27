@@ -1,210 +1,273 @@
-import React, { useState } from 'react';
-import { View, Text, StyleSheet, TextInput, TouchableOpacity, ScrollView, Alert, SafeAreaView, ActivityIndicator } from 'react-native';
-import uuid from 'react-native-uuid';
+import React, { useState, useCallback } from 'react';
+import { View, Text, StyleSheet, FlatList, TouchableOpacity, Alert, SafeAreaView, Dimensions } from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
 import { theme } from '../theme';
-import { addRegistro, getSettings } from '../utils/storage';
-import { calcularCaloriasGPT } from '../utils/openai';
+import { getRegistros, deleteRegistro } from '../utils/storage';
 
-export default function AddRegistroScreen({ navigation }) {
-  const [tipo, setTipo]               = useState('peso');
-  const [nombre, setNombre]           = useState('');
-  const [peso, setPeso]               = useState('');
-  const [ingredientes, setIngredientes] = useState('');
-  const [calorias, setCalorias]       = useState('');
-  const [calculando, setCalculando]   = useState(false);
-  const [saving, setSaving]           = useState(false);
+const SCREEN_W = Dimensions.get('window').width;
+const CHART_W  = SCREEN_W - 48;
+const CHART_H  = 160;
 
-  async function calcularCalorias() {
-    const settings = await getSettings();
-    if (!settings.openaiApiKey) {
-      Alert.alert(
-        '🔑 API Key requerida',
-        'Configurá tu API Key de ChatGPT en ⚙️ Configuración para usar esta función.',
-        [{ text: 'Cancelar', style: 'cancel' }, { text: 'Ir a Config', onPress: () => navigation.navigate('Settings') }]
-      );
-      return;
-    }
-    if (!ingredientes.trim()) { Alert.alert('Sin ingredientes', 'Escribí los ingredientes primero.'); return; }
+function formatDate(ts) {
+  const d = new Date(ts);
+  return d.toLocaleDateString('es-AR', { weekday:'short', day:'numeric', month:'short' });
+}
+function formatTime(ts) {
+  return new Date(ts).toLocaleTimeString('es-AR', { hour:'2-digit', minute:'2-digit' });
+}
 
-    setCalculando(true);
-    try {
-      const kcal = await calcularCaloriasGPT(ingredientes, settings.openaiApiKey);
-      setCalorias(String(kcal));
-      Alert.alert('✅ Calorías calculadas', `ChatGPT estimó ${kcal} kcal para esta comida.`);
-    } catch (e) {
-      Alert.alert('Error al calcular', e.message);
-    } finally {
-      setCalculando(false);
-    }
+// ─── Gráfico de línea simple ──────────────────────────────────────────────────
+function LineChart({ data, color, label, unit, height = CHART_H }) {
+  if (!data.length) return null;
+  const values = data.map(d => d.value);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = max - min || 1;
+  const pts = data.map((d, i) => ({
+    x: (i / Math.max(data.length - 1, 1)) * (CHART_W - 40),
+    y: height - 24 - ((d.value - min) / range) * (height - 48),
+    value: d.value,
+    label: d.label,
+  }));
+
+  return (
+    <View style={[chartStyles.container, { height: height + 40 }]}>
+      <Text style={[chartStyles.chartLabel, { color }]}>{label}</Text>
+      <View style={chartStyles.chartArea}>
+        {/* Líneas de fondo */}
+        {[0, 0.25, 0.5, 0.75, 1].map((f, i) => (
+          <View key={i} style={[chartStyles.gridLine, { bottom: 24 + f * (height - 48) }]} />
+        ))}
+        {/* Valores del eje Y */}
+        <Text style={[chartStyles.yLabel, { bottom: 24 + (height - 48) }]}>{Math.round(max)}</Text>
+        <Text style={[chartStyles.yLabel, { bottom: 24 }]}>{Math.round(min)}</Text>
+        {/* Línea del gráfico */}
+        {pts.slice(1).map((pt, i) => {
+          const prev = pts[i];
+          const dx = pt.x - prev.x;
+          const dy = pt.y - prev.y;
+          const len = Math.sqrt(dx*dx + dy*dy);
+          const angle = Math.atan2(dy, dx) * 180 / Math.PI;
+          return (
+            <View key={i} style={[chartStyles.line, {
+              width: len, left: prev.x + 20,
+              top: prev.y - 1,
+              backgroundColor: color + 'bb',
+              transform: [{ rotate: `${angle}deg` }],
+            }]} />
+          );
+        })}
+        {/* Puntos */}
+        {pts.map((pt, i) => (
+          <View key={i} style={[chartStyles.dot, { left: pt.x + 16, top: pt.y - 5, backgroundColor: color }]}>
+            <Text style={chartStyles.dotLabel}>{pt.value}{unit}</Text>
+          </View>
+        ))}
+        {/* Eje X */}
+        {pts.filter((_, i) => i === 0 || i === pts.length - 1 || pts.length <= 5).map((pt, i) => (
+          <Text key={i} style={[chartStyles.xLabel, { left: pt.x + 8 }]}>{pt.label}</Text>
+        ))}
+      </View>
+    </View>
+  );
+}
+
+const chartStyles = StyleSheet.create({
+  container: { marginBottom: 8 },
+  chartLabel: { fontSize: 12, fontWeight: '700', marginBottom: 4 },
+  chartArea: { flex: 1, position: 'relative' },
+  gridLine: { position: 'absolute', left: 20, right: 0, height: 1, backgroundColor: theme.colors.border },
+  yLabel: { position: 'absolute', left: 0, color: theme.colors.textDim, fontSize: 9, width: 18, textAlign: 'right' },
+  line: { position: 'absolute', height: 2, transformOrigin: 'left center' },
+  dot: { position: 'absolute', width: 10, height: 10, borderRadius: 5 },
+  dotLabel: { position: 'absolute', top: -16, left: -6, color: '#fff', fontSize: 9, fontWeight: '700', width: 32, textAlign: 'center' },
+  xLabel: { position: 'absolute', bottom: 0, color: theme.colors.textDim, fontSize: 9, width: 40, textAlign: 'center' },
+});
+
+// ─── Pantalla principal ───────────────────────────────────────────────────────
+export default function RegistrosScreen({ navigation }) {
+  const [registros, setRegistros] = useState([]);
+  const [filtro, setFiltro] = useState('todos'); // 'todos' | 'peso' | 'comida'
+
+  useFocusEffect(useCallback(() => { load(); }, []));
+
+  async function load() {
+    const data = await getRegistros();
+    setRegistros(data);
   }
 
-  async function guardar() {
-    if (tipo === 'peso' && !peso) { Alert.alert('Falta el peso', 'Ingresá un valor en kg.'); return; }
-    if (tipo === 'comida' && !ingredientes && !calorias) { Alert.alert('Faltan datos', 'Ingresá ingredientes o calorías.'); return; }
-    setSaving(true);
-    try {
-      await addRegistro({
-        id: uuid.v4(),
-        tipo,
-        fecha: Date.now(),
-        nombre: nombre.trim(),
-        peso: tipo === 'peso' ? parseFloat(peso) || null : null,
-        ingredientes: tipo === 'comida' ? ingredientes.trim() : '',
-        calorias: tipo === 'comida' ? parseInt(calorias) || null : null,
+  async function confirmDelete(r) {
+    Alert.alert('Eliminar registro', '¿Eliminar este registro?', [
+      { text: 'Cancelar', style: 'cancel' },
+      { text: 'Eliminar', style: 'destructive', onPress: async () => {
+        await deleteRegistro(r.id);
+        setRegistros(p => p.filter(x => x.id !== r.id));
+      }},
+    ]);
+  }
+
+  // ─── Datos para gráficos ──────────────────────────────────────────────────
+  function buildChartData(tipo, campo) {
+    // Agrupar por día, tomar el último registro del día
+    const byDay = {};
+    registros
+      .filter(r => r.tipo === tipo && r[campo])
+      .forEach(r => {
+        const day = new Date(r.fecha).toLocaleDateString('es-AR', { day:'2-digit', month:'2-digit' });
+        if (!byDay[day] || r.fecha > byDay[day].fecha) byDay[day] = r;
       });
-      navigation.goBack();
-    } catch (e) { Alert.alert('Error', e.message); }
-    finally { setSaving(false); }
+    return Object.entries(byDay)
+      .sort((a,b) => a[1].fecha - b[1].fecha)
+      .slice(-14) // últimos 14 días
+      .map(([day, r]) => ({ label: day, value: r[campo] }));
   }
+
+  // Sumar calorías por día
+  function buildCaloriasChart() {
+    const byDay = {};
+    registros
+      .filter(r => r.tipo === 'comida' && r.calorias)
+      .forEach(r => {
+        const day = new Date(r.fecha).toLocaleDateString('es-AR', { day:'2-digit', month:'2-digit' });
+        byDay[day] = (byDay[day] || { total: 0, fecha: r.fecha });
+        byDay[day].total += r.calorias;
+        if (r.fecha > byDay[day].fecha) byDay[day].fecha = r.fecha;
+      });
+    return Object.entries(byDay)
+      .sort((a,b) => a[1].fecha - b[1].fecha)
+      .slice(-14)
+      .map(([day, d]) => ({ label: day, value: d.total }));
+  }
+
+  const pesoData     = buildChartData('peso', 'peso');
+  const caloriasData = buildCaloriasChart();
+  const filtrados    = filtro === 'todos' ? registros : registros.filter(r => r.tipo === filtro);
+
+  const renderRegistro = ({ item: r }) => (
+    <TouchableOpacity
+      style={styles.card}
+      onLongPress={() => confirmDelete(r)}
+      activeOpacity={0.9}
+    >
+      <View style={[styles.cardIconBox, { backgroundColor: r.tipo === 'peso' ? theme.colors.accent + '22' : '#ff6584' + '22' }]}>
+        <Text style={styles.cardIcon}>{r.tipo === 'peso' ? '⚖️' : '🍽️'}</Text>
+      </View>
+      <View style={styles.cardBody}>
+        <View style={styles.cardTopRow}>
+          <Text style={styles.cardDate}>{formatDate(r.fecha)}</Text>
+          <Text style={styles.cardTime}>{formatTime(r.fecha)}</Text>
+        </View>
+        {r.tipo === 'peso' && (
+          <Text style={styles.cardValue}><Text style={[styles.cardBig, { color: theme.colors.accent }]}>{r.peso}</Text> kg</Text>
+        )}
+        {r.tipo === 'comida' && (
+          <>
+            {r.nombre && <Text style={styles.cardName}>{r.nombre}</Text>}
+            {r.ingredientes ? (
+              <Text style={styles.cardIngred} numberOfLines={2}>{r.ingredientes}</Text>
+            ) : null}
+            {r.calorias ? (
+              <Text style={styles.cardValue}><Text style={[styles.cardBig, { color: '#ff6584' }]}>{r.calorias}</Text> kcal</Text>
+            ) : null}
+          </>
+        )}
+      </View>
+    </TouchableOpacity>
+  );
+
+  const hasPeso     = pesoData.length >= 2;
+  const hasCalorias = caloriasData.length >= 1;
 
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
         <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
-          <Text style={styles.backText}>← Volver</Text>
+          <Text style={styles.backText}>← Agenda</Text>
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>Nuevo registro</Text>
-        <View style={{ width:70 }} />
+        <Text style={styles.headerTitle}>📊 Registros</Text>
+        <View style={{ width: 80 }} />
       </View>
 
-      <ScrollView style={styles.scroll} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+      <FlatList
+        data={filtrados}
+        keyExtractor={r => r.id}
+        showsVerticalScrollIndicator={false}
+        ListHeaderComponent={() => (
+          <View>
+            {/* Gráficos */}
+            {(hasPeso || hasCalorias) && (
+              <View style={styles.chartsSection}>
+                <Text style={styles.chartsTitle}>Evolución</Text>
+                {hasPeso && (
+                  <LineChart data={pesoData} color={theme.colors.accent} label="⚖️ Peso (kg)" unit="kg" />
+                )}
+                {hasCalorias && (
+                  <LineChart data={caloriasData} color="#ff6584" label="🔥 Calorías diarias (kcal)" unit="kcal" />
+                )}
+              </View>
+            )}
 
-        {/* Selector tipo */}
-        <View style={styles.section}>
-          <Text style={styles.sectionLabel}>TIPO DE REGISTRO</Text>
-          <View style={styles.tipoRow}>
-            <TouchableOpacity style={[styles.tipoBtn, tipo==='peso' && styles.tipoBtnPeso]} onPress={() => setTipo('peso')}>
-              <Text style={styles.tipoBtnIcon}>⚖️</Text>
-              <Text style={[styles.tipoBtnText, tipo==='peso' && { color:'#fff' }]}>Peso</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={[styles.tipoBtn, tipo==='comida' && styles.tipoBtnComida]} onPress={() => setTipo('comida')}>
-              <Text style={styles.tipoBtnIcon}>🍽️</Text>
-              <Text style={[styles.tipoBtnText, tipo==='comida' && { color:'#fff' }]}>Comida</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-
-        {/* Descripción */}
-        <View style={styles.section}>
-          <Text style={styles.sectionLabel}>DESCRIPCIÓN (OPCIONAL)</Text>
-          <TextInput
-            style={styles.input}
-            value={nombre} onChangeText={setNombre}
-            placeholder={tipo==='peso' ? 'Ej: Mañana en ayunas...' : 'Ej: Almuerzo, Cena...'}
-            placeholderTextColor={theme.colors.textDim} maxLength={80}
-          />
-        </View>
-
-        {/* Campo peso */}
-        {tipo === 'peso' && (
-          <View style={styles.section}>
-            <Text style={styles.sectionLabel}>⚖️ PESO</Text>
-            <View style={styles.pesoRow}>
-              <TextInput
-                style={styles.pesoInput}
-                value={peso} onChangeText={setPeso}
-                placeholder="75.5"
-                placeholderTextColor={theme.colors.textDim}
-                keyboardType="decimal-pad" maxLength={6}
-              />
-              <View style={styles.pesoUnit}><Text style={styles.pesoUnitText}>kg</Text></View>
+            {/* Filtros */}
+            <View style={styles.filtros}>
+              {[['todos','📋 Todos'],['peso','⚖️ Peso'],['comida','🍽️ Comida']].map(([k,l]) => (
+                <TouchableOpacity key={k} style={[styles.filtroBtn, filtro===k&&styles.filtroBtnActive]} onPress={() => setFiltro(k)}>
+                  <Text style={[styles.filtroText, filtro===k&&styles.filtroTextActive]}>{l}</Text>
+                </TouchableOpacity>
+              ))}
             </View>
+            <Text style={styles.sectionTitle}>Registros ({filtrados.length})</Text>
           </View>
         )}
-
-        {/* Campo comida */}
-        {tipo === 'comida' && (
-          <View style={styles.section}>
-            <Text style={styles.sectionLabel}>🍽️ INGREDIENTES</Text>
-            <Text style={styles.sectionSub}>Escribí o dictá los ingredientes con cantidades</Text>
-            <TextInput
-              style={styles.ingredInput}
-              value={ingredientes} onChangeText={setIngredientes}
-              placeholder="Ej: 200g pollo a la plancha, 100g arroz integral, ensalada..."
-              placeholderTextColor={theme.colors.textDim}
-              multiline numberOfLines={4} textAlignVertical="top"
-            />
-
-            {/* Botón calcular con ChatGPT */}
-            <TouchableOpacity
-              style={[styles.calcBtn, calculando && { opacity:0.6 }]}
-              onPress={calcularCalorias} disabled={calculando}
-            >
-              {calculando ? (
-                <><ActivityIndicator size="small" color="#fff" /><Text style={styles.calcBtnText}>Calculando con ChatGPT...</Text></>
-              ) : (
-                <><Text style={styles.calcBtnIcon}>🤖</Text><Text style={styles.calcBtnText}>Calcular calorías con ChatGPT</Text></>
-              )}
-            </TouchableOpacity>
-
-            {/* Campo calorías */}
-            <View style={styles.calRow}>
-              <Text style={styles.calLabel}>Total de calorías:</Text>
-              <TextInput
-                style={styles.calInput}
-                value={calorias} onChangeText={setCalorias}
-                placeholder="0" placeholderTextColor={theme.colors.textDim}
-                keyboardType="numeric" maxLength={6}
-              />
-              <Text style={styles.calUnit}>kcal</Text>
-            </View>
+        renderItem={renderRegistro}
+        contentContainerStyle={styles.listContent}
+        ListEmptyComponent={() => (
+          <View style={styles.empty}>
+            <Text style={styles.emptyIcon}>📊</Text>
+            <Text style={styles.emptyTitle}>Sin registros</Text>
+            <Text style={styles.emptyText}>Tocá + para registrar tu peso o una comida</Text>
           </View>
         )}
+      />
 
-        {/* Fecha/hora */}
-        <View style={styles.section}>
-          <Text style={styles.sectionLabel}>FECHA Y HORA</Text>
-          <Text style={styles.fechaText}>
-            📅 {new Date().toLocaleDateString('es-AR',{weekday:'long',day:'numeric',month:'long'})}
-            {'  ·  '}🕐 {new Date().toLocaleTimeString('es-AR',{hour:'2-digit',minute:'2-digit'})}
-          </Text>
-          <Text style={styles.fechaSub}>Se guarda con la fecha y hora actual</Text>
-        </View>
-
-        {/* Guardar */}
-        <TouchableOpacity
-          style={[styles.saveBtn, saving && { opacity:0.6 }]}
-          onPress={guardar} disabled={saving} activeOpacity={0.85}
-        >
-          {saving
-            ? <ActivityIndicator size="small" color="#fff"/>
-            : <><Text style={styles.saveIcon}>💾</Text><Text style={styles.saveText}>GUARDAR REGISTRO</Text></>
-          }
-        </TouchableOpacity>
-        <View style={{ height:40 }} />
-      </ScrollView>
+      <TouchableOpacity style={styles.fab} onPress={() => navigation.navigate('AddRegistro')} activeOpacity={0.85}>
+        <Text style={styles.fabText}>+</Text>
+      </TouchableOpacity>
+      <Text style={styles.hint}>Mantené presionado para eliminar</Text>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container:{ flex:1, backgroundColor:theme.colors.background },
-  header:{ flexDirection:'row', alignItems:'center', justifyContent:'space-between', paddingHorizontal:16, paddingVertical:14, borderBottomWidth:1, borderBottomColor:theme.colors.border },
-  backBtn:{ padding:8 }, backText:{ color:theme.colors.primary, fontSize:15 },
-  headerTitle:{ color:theme.colors.text, fontSize:18, fontWeight:'700' },
-  scroll:{ flex:1 },
-  section:{ margin:16, marginBottom:0, backgroundColor:theme.colors.surface, borderRadius:16, padding:16, borderWidth:1, borderColor:theme.colors.border },
-  sectionLabel:{ color:theme.colors.primary, fontSize:11, fontWeight:'700', letterSpacing:1.5, marginBottom:10 },
-  sectionSub:{ color:theme.colors.textMuted, fontSize:12, marginBottom:10 },
-  tipoRow:{ flexDirection:'row', gap:12 },
-  tipoBtn:{ flex:1, flexDirection:'row', alignItems:'center', justifyContent:'center', gap:8, paddingVertical:14, borderRadius:14, backgroundColor:theme.colors.surfaceAlt, borderWidth:1, borderColor:theme.colors.border },
-  tipoBtnPeso:{ backgroundColor:theme.colors.accent, borderColor:theme.colors.accent },
-  tipoBtnComida:{ backgroundColor:'#ff6584', borderColor:'#ff6584' },
-  tipoBtnIcon:{ fontSize:22 }, tipoBtnText:{ color:theme.colors.textMuted, fontSize:16, fontWeight:'700' },
-  input:{ backgroundColor:theme.colors.surfaceAlt, borderRadius:12, padding:14, color:theme.colors.text, fontSize:15, borderWidth:1, borderColor:theme.colors.border },
-  pesoRow:{ flexDirection:'row', gap:10, alignItems:'center' },
-  pesoInput:{ flex:1, backgroundColor:theme.colors.surfaceAlt, borderRadius:12, padding:14, color:theme.colors.text, fontSize:40, fontWeight:'900', textAlign:'center', borderWidth:2, borderColor:theme.colors.accent },
-  pesoUnit:{ backgroundColor:theme.colors.accent+'22', borderRadius:12, padding:16, borderWidth:1, borderColor:theme.colors.accent },
-  pesoUnitText:{ color:theme.colors.accent, fontSize:18, fontWeight:'700' },
-  ingredInput:{ backgroundColor:theme.colors.surfaceAlt, borderRadius:12, padding:14, color:theme.colors.text, fontSize:14, borderWidth:1, borderColor:theme.colors.border, minHeight:100, marginBottom:12 },
-  calcBtn:{ flexDirection:'row', alignItems:'center', justifyContent:'center', gap:8, backgroundColor:'#10a37f', borderRadius:24, paddingVertical:13, paddingHorizontal:20, marginBottom:14 },
-  calcBtnIcon:{ fontSize:18 }, calcBtnText:{ color:'#fff', fontWeight:'700', fontSize:15 },
-  calRow:{ flexDirection:'row', alignItems:'center', justifyContent:'space-between', backgroundColor:theme.colors.surfaceAlt, borderRadius:12, padding:10, borderWidth:1, borderColor:theme.colors.warning },
-  calLabel:{ color:theme.colors.text, fontSize:14, fontWeight:'600' },
-  calInput:{ backgroundColor:theme.colors.background, borderRadius:8, padding:8, color:theme.colors.warning, fontSize:22, fontWeight:'800', textAlign:'center', minWidth:80, borderWidth:1, borderColor:theme.colors.warning },
-  calUnit:{ color:theme.colors.warning, fontWeight:'700', fontSize:13 },
-  fechaText:{ color:theme.colors.text, fontSize:13, fontWeight:'600', marginBottom:4 },
-  fechaSub:{ color:theme.colors.textMuted, fontSize:11 },
-  saveBtn:{ flexDirection:'row', alignItems:'center', justifyContent:'center', gap:10, margin:16, backgroundColor:theme.colors.success, borderRadius:20, paddingVertical:18, elevation:6 },
-  saveIcon:{ fontSize:22 }, saveText:{ color:'#fff', fontSize:18, fontWeight:'900', letterSpacing:1 },
+  container: { flex: 1, backgroundColor: theme.colors.background },
+  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: theme.colors.border },
+  backBtn: { padding: 8 },
+  backText: { color: theme.colors.primary, fontSize: 15 },
+  headerTitle: { color: theme.colors.text, fontSize: 20, fontWeight: '800' },
+  chartsSection: { margin: 16, backgroundColor: theme.colors.surface, borderRadius: 16, padding: 16, borderWidth: 1, borderColor: theme.colors.border },
+  chartsTitle: { color: theme.colors.text, fontSize: 16, fontWeight: '700', marginBottom: 12 },
+  filtros: { flexDirection: 'row', paddingHorizontal: 16, gap: 8, marginBottom: 8 },
+  filtroBtn: { flex: 1, paddingVertical: 8, borderRadius: 20, backgroundColor: theme.colors.surface, alignItems: 'center', borderWidth: 1, borderColor: theme.colors.border },
+  filtroBtnActive: { backgroundColor: theme.colors.primary, borderColor: theme.colors.primary },
+  filtroText: { color: theme.colors.textMuted, fontSize: 12, fontWeight: '600' },
+  filtroTextActive: { color: '#fff' },
+  sectionTitle: { color: theme.colors.textMuted, fontSize: 12, fontWeight: '700', letterSpacing: 1, marginLeft: 16, marginBottom: 4 },
+  listContent: { paddingHorizontal: 16, paddingBottom: 100 },
+  card: { flexDirection: 'row', backgroundColor: theme.colors.cardBg, borderRadius: 14, marginBottom: 10, borderWidth: 1, borderColor: theme.colors.border, overflow: 'hidden' },
+  cardIconBox: { width: 56, alignItems: 'center', justifyContent: 'center' },
+  cardIcon: { fontSize: 26 },
+  cardBody: { flex: 1, padding: 12 },
+  cardTopRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 },
+  cardDate: { color: theme.colors.text, fontSize: 13, fontWeight: '700' },
+  cardTime: { color: theme.colors.textMuted, fontSize: 12 },
+  cardName: { color: theme.colors.text, fontSize: 14, fontWeight: '600', marginBottom: 2 },
+  cardIngred: { color: theme.colors.textMuted, fontSize: 12, marginBottom: 4 },
+  cardValue: { color: theme.colors.textMuted, fontSize: 13 },
+  cardBig: { fontSize: 22, fontWeight: '900' },
+  empty: { alignItems: 'center', paddingVertical: 60 },
+  emptyIcon: { fontSize: 56, marginBottom: 12 },
+  emptyTitle: { color: theme.colors.text, fontSize: 20, fontWeight: '700', marginBottom: 6 },
+  emptyText: { color: theme.colors.textMuted, fontSize: 14, textAlign: 'center' },
+  fab: { position: 'absolute', bottom: 40, right: 24, width: 64, height: 64, borderRadius: 32, backgroundColor: '#ff6584', alignItems: 'center', justifyContent: 'center', elevation: 8, shadowColor: '#ff6584', shadowOffset:{width:0,height:4}, shadowOpacity:0.4, shadowRadius:8 },
+  fabText: { color: '#fff', fontSize: 32, lineHeight: 36, fontWeight: '300' },
+  hint: { position: 'absolute', bottom: 16, alignSelf: 'center', color: theme.colors.textDim, fontSize: 11 },
 });
