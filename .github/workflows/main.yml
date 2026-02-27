@@ -8,9 +8,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: agenda-voz
     steps:
       - uses: actions/checkout@v4
 
@@ -18,14 +15,16 @@ jobs:
         with:
           node-version: 20
 
-      - run: npm install --legacy-peer-deps
+      - name: Instalar dependencias
+        run: npm install --legacy-peer-deps
+        working-directory: agenda-voz
 
       - run: npm install -g eas-cli
 
       - name: Generar keystore
         run: |
           keytool -genkeypair -v \
-            -keystore agenda-voz.keystore \
+            -keystore ${{ github.workspace }}/agenda-voz/agenda-voz.keystore \
             -alias agenda-voz \
             -keyalg RSA -keysize 2048 -validity 10000 \
             -storepass android123 -keypass android123 \
@@ -33,29 +32,33 @@ jobs:
 
       - name: Crear credentials.json
         run: |
-          echo '{
+          cat > ${{ github.workspace }}/agenda-voz/credentials.json << 'EOF'
+          {
             "android": {
               "keystore": {
-                "keystorePath": "agenda-voz.keystore",
+                "keystorePath": "${{ github.workspace }}/agenda-voz/agenda-voz.keystore",
                 "keystorePassword": "android123",
                 "keyAlias": "agenda-voz",
                 "keyPassword": "android123"
               }
             }
-          }' > credentials.json
+          }
+          EOF
 
       - name: Registrar proyecto en Expo
         run: eas init --force --non-interactive
+        working-directory: agenda-voz
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
 
       - name: Compilar APK
-        run: eas build -p android --profile preview --non-interactive --local --output ./agenda-voz-release.apk
+        run: eas build -p android --profile preview --non-interactive --local --output ${{ github.workspace }}/agenda-voz-release.apk
+        working-directory: agenda-voz
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
 
       - uses: actions/upload-artifact@v4
         with:
           name: agenda-voz-apk
-          path: agenda-voz/agenda-voz-release.apk
+          path: agenda-voz-release.apk
           retention-days: 30
