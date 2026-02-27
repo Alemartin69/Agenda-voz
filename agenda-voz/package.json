@@ -10,10 +10,12 @@
   "dependencies": {
     "expo": "~51.0.28",
     "expo-av": "~14.0.7",
+    "expo-background-fetch": "~12.0.1",
     "expo-file-system": "~17.0.1",
     "expo-keep-awake": "~13.0.2",
     "expo-notifications": "~0.28.19",
     "expo-status-bar": "~1.12.1",
+    "expo-task-manager": "~11.8.2",
     "expo-speech": "~12.0.2",
     "expo-haptics": "~13.0.1",
     "expo-splash-screen": "~0.27.6",
