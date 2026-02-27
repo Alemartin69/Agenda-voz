@@ -6,16 +6,16 @@ import { getItems, updateItem, deleteItem } from '../utils/storage';
 import { scheduleItemAlarms, cancelItemAlarms } from '../utils/alarmManager';
 
 const DAY_LABELS = { 1:'Dom', 2:'Lun', 3:'Mar', 4:'Mié', 5:'Jue', 6:'Vie', 7:'Sáb' };
+const DAY_ORDER  = [2,3,4,5,6,7,1];
 
 const TIPO_CONFIG = {
   recordatorio: { icon: '🔔', color: '#6c63ff', label: 'Recordatorio' },
   vencimiento:  { icon: '📅', color: '#ffa502', label: 'Vencimiento' },
-  peso:         { icon: '⚖️', color: '#2ed573', label: 'Peso' },
-  comida:       { icon: '🍽️', color: '#ff6584', label: 'Comida' },
 };
 
 export default function HomeScreen({ navigation }) {
   const [items, setItems] = useState([]);
+  const [viewMode, setViewMode] = useState('agenda'); // 'agenda' | 'lista'
 
   useFocusEffect(useCallback(() => { loadItems(); }, []));
 
@@ -33,13 +33,14 @@ export default function HomeScreen({ navigation }) {
   }
 
   async function confirmDelete(item) {
-    Alert.alert('Eliminar', `¿Eliminar "${item.name}"?`,
-      [{ text: 'Cancelar', style: 'cancel' },
-       { text: 'Eliminar', style: 'destructive', onPress: async () => {
-         await cancelItemAlarms(item.id);
-         await deleteItem(item.id);
-         setItems(p => p.filter(i => i.id !== item.id));
-       }}]);
+    Alert.alert('Eliminar', `¿Eliminar "${item.name}"?`, [
+      { text: 'Cancelar', style: 'cancel' },
+      { text: 'Eliminar', style: 'destructive', onPress: async () => {
+        await cancelItemAlarms(item.id);
+        await deleteItem(item.id);
+        setItems(p => p.filter(i => i.id !== item.id));
+      }},
+    ]);
   }
 
   function formatDays(days) {
@@ -47,77 +48,130 @@ export default function HomeScreen({ navigation }) {
     if (days.length === 7) return 'Todos los días';
     if (days.length === 5 && [2,3,4,5,6].every(d => days.includes(d))) return 'Lun–Vie';
     if (days.length === 2 && [1,7].every(d => days.includes(d))) return 'Fin de semana';
-    return days.map(d => DAY_LABELS[d]).join(', ');
+    return days.sort((a,b)=>DAY_ORDER.indexOf(a)-DAY_ORDER.indexOf(b)).map(d => DAY_LABELS[d]).join(', ');
   }
 
-  function renderExtraInfo(item) {
-    const tipo = item.tipo || 'recordatorio';
-    if (tipo === 'peso' && item.peso) return `⚖️ ${item.peso} kg`;
-    if (tipo === 'comida' && item.calorias) return `🔥 ${item.calorias} kcal`;
-    if (tipo === 'comida' && item.ingredientes) return `🍽️ ${item.ingredientes.substring(0, 30)}...`;
-    return null;
+  // ─── Modo Agenda: agrupar por día ───────────────────────────────────────────
+  function buildAgenda() {
+    const agenda = [];
+    for (const dayId of DAY_ORDER) {
+      const dayItems = items
+        .filter(i => i.schedule?.days?.includes(dayId))
+        .sort((a,b) => (a.schedule?.time || '').localeCompare(b.schedule?.time || ''));
+      if (dayItems.length > 0) {
+        agenda.push({ type: 'header', dayId, label: getDayFull(dayId), key: `h${dayId}` });
+        dayItems.forEach(item => agenda.push({ type: 'item', item, key: `i${item.id}d${dayId}` }));
+      }
+    }
+    return agenda;
   }
 
-  const renderItem = ({ item }) => {
+  function getDayFull(id) {
+    return { 1:'Domingo', 2:'Lunes', 3:'Martes', 4:'Miércoles', 5:'Jueves', 6:'Viernes', 7:'Sábado' }[id];
+  }
+
+  function isToday(dayId) {
+    const today = new Date().getDay(); // 0=Sun
+    const map = { 0:1, 1:2, 2:3, 3:4, 4:5, 5:6, 6:7 };
+    return map[today] === dayId;
+  }
+
+  const renderAgendaRow = ({ item: row }) => {
+    if (row.type === 'header') {
+      const today = isToday(row.dayId);
+      return (
+        <View style={[styles.agendaHeader, today && styles.agendaHeaderToday]}>
+          <Text style={[styles.agendaHeaderText, today && styles.agendaHeaderTextToday]}>
+            {today ? '📍 ' : ''}{row.label}
+          </Text>
+          {today && <View style={styles.todayBadge}><Text style={styles.todayBadgeText}>HOY</Text></View>}
+        </View>
+      );
+    }
+    const { item } = row;
     const tc = TIPO_CONFIG[item.tipo || 'recordatorio'];
-    const extra = renderExtraInfo(item);
     return (
       <TouchableOpacity
-        style={[styles.card, !item.active && styles.cardInactive]}
+        style={[styles.agendaCard, !item.active && styles.cardInactive]}
         onPress={() => navigation.navigate('AddEdit', { item })}
         onLongPress={() => confirmDelete(item)}
         activeOpacity={0.85}
       >
-        <View style={[styles.tipoBar, { backgroundColor: tc.color }]} />
-        <View style={styles.cardLeft}>
+        <View style={[styles.timeBlock, { borderLeftColor: tc.color }]}>
+          <Text style={[styles.timeText, { color: tc.color }]}>{item.schedule?.time || '--:--'}</Text>
           <Text style={styles.tipoIcon}>{tc.icon}</Text>
-          <View style={styles.cardInfo}>
-            <View style={styles.cardTopRow}>
-              <Text style={[styles.itemName, !item.active && styles.textMuted]} numberOfLines={1}>{item.name}</Text>
-              <View style={[styles.tipoBadge, { backgroundColor: tc.color + '22', borderColor: tc.color + '55' }]}>
-                <Text style={[styles.tipoBadgeText, { color: tc.color }]}>{tc.label}</Text>
-              </View>
-            </View>
-            <View style={styles.itemMeta}>
-              <Text style={styles.metaText}>🕐 {item.schedule?.time || '--:--'}</Text>
-              <Text style={styles.metaSep}>·</Text>
-              <Text style={styles.metaText}>📅 {formatDays(item.schedule?.days)}</Text>
-            </View>
-            <View style={styles.itemMeta}>
-              <Text style={styles.metaText}>🔄 {item.repeatInterval || 5} min</Text>
-              {item.audioUri || item.audioFilePath
-                ? <><Text style={styles.metaSep}>·</Text><Text style={[styles.metaText, { color: theme.colors.accent }]}>🎙️ Con audio</Text></>
-                : <><Text style={styles.metaSep}>·</Text><Text style={[styles.metaText, { color: theme.colors.warning }]}>⚠️ Sin audio</Text></>
-              }
-            </View>
-            {extra && (
-              <View style={[styles.extraBadge, { backgroundColor: tc.color + '15' }]}>
-                <Text style={[styles.extraText, { color: tc.color }]}>{extra}</Text>
-              </View>
-            )}
+        </View>
+        <View style={styles.agendaCardBody}>
+          <Text style={[styles.agendaItemName, !item.active && styles.textMuted]} numberOfLines={1}>{item.name}</Text>
+          <View style={styles.agendaMeta}>
+            <Text style={styles.metaText}>🔄 c/{item.repeatInterval||5}min</Text>
+            {(item.audioUri||item.audioFilePath)
+              ? <Text style={[styles.metaText,{color:theme.colors.accent,marginLeft:8}]}>🎙️ Audio</Text>
+              : <Text style={[styles.metaText,{color:theme.colors.warning,marginLeft:8}]}>⚠️ Sin audio</Text>}
           </View>
         </View>
         <Switch
           value={item.active}
           onValueChange={() => toggleActive(item)}
-          trackColor={{ false: theme.colors.border, true: theme.colors.primary + '88' }}
-          thumbColor={item.active ? theme.colors.primary : theme.colors.textDim}
+          trackColor={{ false: theme.colors.border, true: tc.color + '88' }}
+          thumbColor={item.active ? tc.color : theme.colors.textDim}
         />
       </TouchableOpacity>
     );
   };
 
-  const activos = items.filter(i => i.active).length;
+  const renderListCard = ({ item }) => {
+    const tc = TIPO_CONFIG[item.tipo || 'recordatorio'];
+    return (
+      <TouchableOpacity
+        style={[styles.listCard, !item.active && styles.cardInactive]}
+        onPress={() => navigation.navigate('AddEdit', { item })}
+        onLongPress={() => confirmDelete(item)}
+        activeOpacity={0.85}
+      >
+        <View style={[styles.tipoBar, { backgroundColor: tc.color }]} />
+        <View style={styles.listCardContent}>
+          <View style={styles.listCardTop}>
+            <Text style={styles.tipoIconLg}>{tc.icon}</Text>
+            <Text style={[styles.listItemName, !item.active && styles.textMuted]} numberOfLines={1}>{item.name}</Text>
+            <Switch value={item.active} onValueChange={() => toggleActive(item)}
+              trackColor={{ false: theme.colors.border, true: tc.color+'88' }}
+              thumbColor={item.active ? tc.color : theme.colors.textDim} />
+          </View>
+          <Text style={styles.listMeta}>🕐 {item.schedule?.time} · 📅 {formatDays(item.schedule?.days)}</Text>
+        </View>
+      </TouchableOpacity>
+    );
+  };
+
+  const agendaData  = buildAgenda();
+  const activos     = items.filter(i => i.active).length;
 
   return (
     <SafeAreaView style={styles.container}>
+      {/* Header */}
       <View style={styles.header}>
         <View>
-          <Text style={styles.headerTitle}>Agenda Voz</Text>
-          <Text style={styles.headerSub}>{activos} recordatorio{activos !== 1 ? 's' : ''} activo{activos !== 1 ? 's' : ''}</Text>
+          <Text style={styles.headerTitle}>📋 Agenda</Text>
+          <Text style={styles.headerSub}>{activos} activo{activos!==1?'s':''} de {items.length}</Text>
         </View>
-        <TouchableOpacity style={styles.settingsBtn} onPress={() => navigation.navigate('Settings')}>
-          <Text style={styles.settingsIcon}>⚙️</Text>
+        <View style={styles.headerActions}>
+          <TouchableOpacity style={styles.iconBtn} onPress={() => navigation.navigate('Registros')}>
+            <Text style={styles.iconBtnText}>📊</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.iconBtn} onPress={() => navigation.navigate('Settings')}>
+            <Text style={styles.iconBtnText}>⚙️</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      {/* Toggle vista */}
+      <View style={styles.viewToggle}>
+        <TouchableOpacity style={[styles.toggleBtn, viewMode==='agenda'&&styles.toggleBtnActive]} onPress={() => setViewMode('agenda')}>
+          <Text style={[styles.toggleText, viewMode==='agenda'&&styles.toggleTextActive]}>📅 Por día</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={[styles.toggleBtn, viewMode==='lista'&&styles.toggleBtnActive]} onPress={() => setViewMode('lista')}>
+          <Text style={[styles.toggleText, viewMode==='lista'&&styles.toggleTextActive]}>📋 Lista</Text>
         </TouchableOpacity>
       </View>
 
@@ -125,10 +179,24 @@ export default function HomeScreen({ navigation }) {
         <View style={styles.empty}>
           <Text style={styles.emptyIcon}>📋</Text>
           <Text style={styles.emptyTitle}>Sin recordatorios</Text>
-          <Text style={styles.emptyText}>Tocá el botón + para crear tu primer recordatorio</Text>
+          <Text style={styles.emptyText}>Tocá + para crear tu primer recordatorio</Text>
         </View>
+      ) : viewMode === 'agenda' ? (
+        <FlatList
+          data={agendaData}
+          keyExtractor={r => r.key}
+          renderItem={renderAgendaRow}
+          contentContainerStyle={styles.list}
+          showsVerticalScrollIndicator={false}
+        />
       ) : (
-        <FlatList data={items} keyExtractor={i => i.id} renderItem={renderItem} contentContainerStyle={styles.list} showsVerticalScrollIndicator={false} />
+        <FlatList
+          data={items}
+          keyExtractor={i => i.id}
+          renderItem={renderListCard}
+          contentContainerStyle={styles.list}
+          showsVerticalScrollIndicator={false}
+        />
       )}
 
       <TouchableOpacity style={styles.fab} onPress={() => navigation.navigate('AddEdit', { item: null })} activeOpacity={0.85}>
@@ -141,33 +209,48 @@ export default function HomeScreen({ navigation }) {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: theme.colors.background },
-  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: theme.spacing.lg, paddingTop: theme.spacing.lg, paddingBottom: theme.spacing.md },
-  headerTitle: { color: theme.colors.text, fontSize: theme.fontSize.xxl, fontWeight: '800' },
-  headerSub: { color: theme.colors.textMuted, fontSize: theme.fontSize.sm, marginTop: 2 },
-  settingsBtn: { width: 44, height: 44, borderRadius: theme.radius.round, backgroundColor: theme.colors.surface, alignItems: 'center', justifyContent: 'center' },
-  settingsIcon: { fontSize: 20 },
-  list: { padding: theme.spacing.md, paddingBottom: 100 },
-  card: { backgroundColor: theme.colors.cardBg, borderRadius: theme.radius.lg, marginBottom: theme.spacing.md, flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: theme.colors.border, overflow: 'hidden' },
-  cardInactive: { opacity: 0.55 },
+  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 20, paddingTop: 16, paddingBottom: 8 },
+  headerTitle: { color: theme.colors.text, fontSize: 26, fontWeight: '800' },
+  headerSub: { color: theme.colors.textMuted, fontSize: 13, marginTop: 2 },
+  headerActions: { flexDirection: 'row', gap: 8 },
+  iconBtn: { width: 42, height: 42, borderRadius: 21, backgroundColor: theme.colors.surface, alignItems: 'center', justifyContent: 'center' },
+  iconBtnText: { fontSize: 20 },
+  viewToggle: { flexDirection: 'row', marginHorizontal: 16, marginBottom: 8, backgroundColor: theme.colors.surface, borderRadius: 12, padding: 4, borderWidth: 1, borderColor: theme.colors.border },
+  toggleBtn: { flex: 1, paddingVertical: 8, borderRadius: 10, alignItems: 'center' },
+  toggleBtnActive: { backgroundColor: theme.colors.primary },
+  toggleText: { color: theme.colors.textMuted, fontWeight: '600', fontSize: 13 },
+  toggleTextActive: { color: '#fff' },
+  list: { paddingHorizontal: 16, paddingBottom: 100 },
+  // Agenda
+  agendaHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 16, marginBottom: 6, paddingHorizontal: 4 },
+  agendaHeaderToday: {},
+  agendaHeaderText: { color: theme.colors.textMuted, fontSize: 13, fontWeight: '700', letterSpacing: 1, textTransform: 'uppercase' },
+  agendaHeaderTextToday: { color: theme.colors.primary },
+  todayBadge: { backgroundColor: theme.colors.primary, borderRadius: 8, paddingHorizontal: 8, paddingVertical: 2 },
+  todayBadgeText: { color: '#fff', fontSize: 11, fontWeight: '800' },
+  agendaCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: theme.colors.cardBg, borderRadius: 14, marginBottom: 8, borderWidth: 1, borderColor: theme.colors.border, overflow: 'hidden' },
+  timeBlock: { width: 64, alignSelf: 'stretch', alignItems: 'center', justifyContent: 'center', borderLeftWidth: 4, paddingVertical: 12 },
+  timeText: { fontSize: 15, fontWeight: '800' },
+  tipoIcon: { fontSize: 16, marginTop: 4 },
+  agendaCardBody: { flex: 1, paddingHorizontal: 12, paddingVertical: 10 },
+  agendaItemName: { color: theme.colors.text, fontSize: 15, fontWeight: '700', marginBottom: 4 },
+  agendaMeta: { flexDirection: 'row', alignItems: 'center' },
+  // Lista
+  listCard: { flexDirection: 'row', backgroundColor: theme.colors.cardBg, borderRadius: 14, marginBottom: 10, borderWidth: 1, borderColor: theme.colors.border, overflow: 'hidden' },
   tipoBar: { width: 4, alignSelf: 'stretch' },
-  cardLeft: { flex: 1, flexDirection: 'row', alignItems: 'center', padding: theme.spacing.md },
-  tipoIcon: { fontSize: 26, marginRight: 10 },
-  cardInfo: { flex: 1 },
-  cardTopRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 },
-  itemName: { color: theme.colors.text, fontSize: theme.fontSize.md, fontWeight: '700', flex: 1, marginRight: 8 },
+  listCardContent: { flex: 1, padding: 12 },
+  listCardTop: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 },
+  tipoIconLg: { fontSize: 22 },
+  listItemName: { flex: 1, color: theme.colors.text, fontSize: 15, fontWeight: '700' },
+  listMeta: { color: theme.colors.textMuted, fontSize: 12 },
+  cardInactive: { opacity: 0.5 },
   textMuted: { color: theme.colors.textMuted },
-  tipoBadge: { borderRadius: theme.radius.round, paddingHorizontal: 8, paddingVertical: 2, borderWidth: 1 },
-  tipoBadgeText: { fontSize: theme.fontSize.xs, fontWeight: '700' },
-  itemMeta: { flexDirection: 'row', alignItems: 'center', marginTop: 2 },
-  metaText: { color: theme.colors.textMuted, fontSize: theme.fontSize.xs },
-  metaSep: { color: theme.colors.textDim, marginHorizontal: 4, fontSize: theme.fontSize.xs },
-  extraBadge: { marginTop: 6, borderRadius: theme.radius.sm, paddingHorizontal: 8, paddingVertical: 3, alignSelf: 'flex-start' },
-  extraText: { fontSize: theme.fontSize.xs, fontWeight: '700' },
-  empty: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: theme.spacing.xl },
-  emptyIcon: { fontSize: 64, marginBottom: theme.spacing.lg },
-  emptyTitle: { color: theme.colors.text, fontSize: theme.fontSize.xl, fontWeight: '700', marginBottom: theme.spacing.sm },
-  emptyText: { color: theme.colors.textMuted, fontSize: theme.fontSize.md, textAlign: 'center', lineHeight: 22 },
-  fab: { position: 'absolute', bottom: 40, right: 24, width: 64, height: 64, borderRadius: 32, backgroundColor: theme.colors.primary, alignItems: 'center', justifyContent: 'center', elevation: 8, shadowColor: theme.colors.primary, shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.4, shadowRadius: 8 },
+  metaText: { color: theme.colors.textMuted, fontSize: 12 },
+  empty: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 32 },
+  emptyIcon: { fontSize: 64, marginBottom: 16 },
+  emptyTitle: { color: theme.colors.text, fontSize: 22, fontWeight: '700', marginBottom: 8 },
+  emptyText: { color: theme.colors.textMuted, fontSize: 15, textAlign: 'center' },
+  fab: { position: 'absolute', bottom: 40, right: 24, width: 64, height: 64, borderRadius: 32, backgroundColor: theme.colors.primary, alignItems: 'center', justifyContent: 'center', elevation: 8, shadowColor: theme.colors.primary, shadowOffset:{width:0,height:4}, shadowOpacity:0.4, shadowRadius:8 },
   fabText: { color: '#fff', fontSize: 32, lineHeight: 36, fontWeight: '300' },
-  hint: { position: 'absolute', bottom: 16, alignSelf: 'center', color: theme.colors.textDim, fontSize: theme.fontSize.xs },
+  hint: { position: 'absolute', bottom: 16, alignSelf: 'center', color: theme.colors.textDim, fontSize: 11 },
 });
