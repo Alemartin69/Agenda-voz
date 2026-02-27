@@ -8,13 +8,16 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: agenda-voz
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-         
+
       - run: npm install --legacy-peer-deps
 
       - run: npm install -g eas-cli
@@ -26,5 +29,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: agenda-voz-apk
-          path: "*.apk"
+          path: "agenda-voz/*.apk"
           retention-days: 30
